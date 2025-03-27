@@ -2,12 +2,15 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
+# Копируем файл зависимостей
 COPY requirements.txt .
 
 # Установка зависимостей
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
+# Копируем остальные файлы
 COPY . .
 
+# Указываем команду для запуска
 CMD ["/opt/venv/bin/python", "main1.py"] 
