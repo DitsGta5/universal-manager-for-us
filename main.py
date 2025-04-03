@@ -2,11 +2,13 @@ import os
 import datetime
 import random
 import sqlite3
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
+from aiogram.filters.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 import requests
 import wikipediaapi
@@ -30,29 +32,57 @@ load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # ID канала для обязательной подписки
+CHANNEL_URL = os.getenv("CHANNEL_URL")  # URL для вступления в канал
 
-# Инициализация
-bot = Bot(token=TOKEN, parse_mode=types.ParseMode.HTML)
-dp = Dispatcher(bot, storage=MemoryStorage())
+# Инициализация бота и диспетчера
+bot = Bot(token=TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 translator = Translator()
 wiki_wiki = wikipediaapi.Wikipedia(language='ru', user_agent='your_email@example.com')
 
-# Главное меню
-menu_kb = ReplyKeyboardMarkup(resize_keyboard=True)
-menu_kb.row("📑 Жалобы/Предложения", "🔎 Википедия", "🌤 Погода", "🈹 Переводчик", "💰 Курс валют")
-menu_kb.row("📅 Дата и время", "🎲 Случайное число", "📍 Местоположение")
-menu_kb.row("📊 Моя статистика", "⭐️ Избранное", "📜 История", "🗑 Очистить историю")
+# Клавиатуры
+menu_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📑 Жалобы/Предложения"), KeyboardButton(text="🔎 Википедия")],
+        [KeyboardButton(text="🌤 Погода"), KeyboardButton(text="🈹 Переводчик"), KeyboardButton(text="💰 Курс валют")],
+        [KeyboardButton(text="📅 Дата и время"), KeyboardButton(text="🎲 Случайное число"), KeyboardButton(text="📍 Местоположение")],
+        [KeyboardButton(text="📊 Моя статистика"), KeyboardButton(text="⭐️ Избранное"), KeyboardButton(text="📜 История"), KeyboardButton(text="🗑 Очистить историю")]
+    ],
+    resize_keyboard=True
+)
 
-# Меню статистики
-stats_kb = ReplyKeyboardMarkup(resize_keyboard=True)
-stats_kb.row("📊 Моя статистика", "📜 История")
-stats_kb.row("⭐️ Избранное", "🗑 Очистить историю")
-stats_kb.row("🔙 Назад в главное меню")
+stats_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📊 Моя статистика"), KeyboardButton(text="📜 История")],
+        [KeyboardButton(text="⭐️ Избранное"), KeyboardButton(text="🗑 Очистить историю")],
+        [KeyboardButton(text="🔙 Назад в главное меню")]
+    ],
+    resize_keyboard=True
+)
 
-# Меню избранного
-favorites_kb = ReplyKeyboardMarkup(resize_keyboard=True)
-favorites_kb.row("➕ Добавить в избранное", "➖ Удалить из избранного")
-favorites_kb.row("🔙 Назад в главное меню")
+favorites_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="➕ Добавить в избранное"), KeyboardButton(text="➖ Удалить из избранного")],
+        [KeyboardButton(text="🔙 Назад в главное меню")]
+    ],
+    resize_keyboard=True
+)
+
+confirm_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="✅ Подтвердить"), KeyboardButton(text="❌ Отмена")]
+    ],
+    resize_keyboard=True
+)
+
+# Создаем клавиатуру для подписки на канал
+subscribe_kb = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться на канал", url=CHANNEL_URL)],
+        [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_subscription")]
+    ]
+)
 
 # Инициализация базы данных
 def init_db():
@@ -83,6 +113,16 @@ def init_db():
                   last_active DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
+
+# Функция для сохранения запроса в базу данных
+def save_query(user_id, username, query_type, query_text):
+    conn = sqlite3.connect('bot_database.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO query_history (user_id, username, query_type, query_text) VALUES (?, ?, ?, ?)',
+              (user_id, username, query_type, query_text))
+    conn.commit()
+    conn.close()
+    update_user_stats(user_id, username, query_type)
 
 # Функция для обновления статистики пользователя
 def update_user_stats(user_id, username, query_type):
@@ -135,25 +175,6 @@ def get_user_stats(user_id):
     conn.close()
     return stats
 
-# Обновляем функцию save_query
-def save_query(user_id, username, query_type, query_text):
-    conn = sqlite3.connect('bot_database.db')
-    c = conn.cursor()
-    c.execute('INSERT INTO query_history (user_id, username, query_type, query_text) VALUES (?, ?, ?, ?)',
-              (user_id, username, query_type, query_text))
-    conn.commit()
-    conn.close()
-    update_user_stats(user_id, username, query_type)
-
-# Функция для получения статистики
-def get_statistics():
-    conn = sqlite3.connect('bot_database.db')
-    c = conn.cursor()
-    c.execute('SELECT query_type, COUNT(*) FROM query_history GROUP BY query_type')
-    stats = c.fetchall()
-    conn.close()
-    return stats
-
 # Функция для получения истории запросов пользователя
 def get_user_history(user_id, limit=5):
     conn = sqlite3.connect('bot_database.db')
@@ -188,14 +209,73 @@ def clear_user_history(user_id):
     conn.commit()
     conn.close()
 
-# Команда /start
-@dp.message_handler(commands=['start'])
-async def send_welcome(message: types.Message):
-    await message.answer("👋 Привет! Я бот-справочник. Чем могу помочь?", reply_markup=menu_kb)
+# Функция проверки подписки на канал
+async def check_subscription(user_id):
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        if member.status in ['creator', 'administrator', 'member']:
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка при проверке подписки: {e}")
+        return False
 
-# Команда /help
-@dp.message_handler(commands=['help'])
-async def send_help(message: types.Message):
+# Функция-middleware для проверки подписки
+async def subscription_filter(handler, event, data):
+    user = data["event_from_user"]
+    if isinstance(event, types.Message) or isinstance(event, types.CallbackQuery):
+        # Проверяем, является ли пользователь администратором
+        if user.id == ADMIN_ID:
+            return await handler(event, data)
+        
+        # Проверяем подписку
+        is_subscribed = await check_subscription(user.id)
+        if not is_subscribed:
+            if isinstance(event, types.CallbackQuery) and event.data == "check_subscription":
+                # Если это проверка подписки через callback
+                await event.answer("Вы еще не подписались на канал!", show_alert=True)
+                return
+            
+            # Отправляем сообщение с предложением подписаться
+            if isinstance(event, types.Message):
+                await event.answer("Для использования бота необходимо подписаться на наш канал!", reply_markup=subscribe_kb)
+            elif isinstance(event, types.CallbackQuery):
+                await event.message.answer("Для использования бота необходимо подписаться на наш канал!", reply_markup=subscribe_kb)
+            return
+    
+    return await handler(event, data)
+
+# Регистрация middleware
+dp.message.middleware(subscription_filter)
+dp.callback_query.middleware(subscription_filter)
+
+# Классы состояний
+class ComplaintForm(StatesGroup):
+    full_name = State()
+    contact = State()
+    complaint_text = State()
+    confirm = State()
+
+class WikiSearch(StatesGroup):
+    searching = State()
+
+class TranslateText(StatesGroup):
+    translating = State()
+
+class WeatherCity(StatesGroup):
+    waiting_city = State()
+
+class FavoriteManage(StatesGroup):
+    adding = State()
+    removing = State()
+
+# Обработчики команд
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("👋 Привет! Я бот-справочник. Чем могу помочь?", reply_markup=menu_kb, parse_mode="HTML")
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
     help_text = ("📌 Доступные команды:\n"
                  "/start - Начать работу с ботом\n"
                  "/help - Получить справку по функциям бота\n"
@@ -212,47 +292,49 @@ async def send_help(message: types.Message):
                  "📅 Дата и время - Узнать текущее время\n"
                  "🎲 Случайное число - Сгенерировать случайное число\n"
                  "📍 Местоположение - Заглушка")
-    await message.answer(help_text)
+    await message.answer(help_text, parse_mode="HTML")
+
+# Обработчик callback-запросов
+@dp.callback_query(F.data == "check_subscription")
+async def callback_check_subscription(callback: types.CallbackQuery):
+    is_subscribed = await check_subscription(callback.from_user.id)
+    if is_subscribed:
+        await callback.message.delete()
+        await callback.message.answer("✅ Спасибо за подписку! Теперь вы можете использовать все функции бота.", reply_markup=menu_kb)
+    else:
+        await callback.answer("Вы ещё не подписались на канал!", show_alert=True)
 
 # Жалобы/Предложения
-class ComplaintForm(StatesGroup):
-    full_name = State()
-    contact = State()
-    complaint_text = State()
-    confirm = State()
-
-@dp.message_handler(lambda message: message.text == "📑 Жалобы/Предложения")
-async def complaints_suggestions_start(message: types.Message, state: FSMContext):
+@dp.message(F.text == "📑 Жалобы/Предложения")
+async def process_complaint_start(message: types.Message, state: FSMContext):
+    await state.set_state(ComplaintForm.full_name)
     await message.answer("📝 Пожалуйста, введите ваше ФИО:")
-    await ComplaintForm.full_name.set()
 
-@dp.message_handler(state=ComplaintForm.full_name)
-async def complaint_get_name(message: types.Message, state: FSMContext):
+@dp.message(ComplaintForm.full_name)
+async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(full_name=message.text)
+    await state.set_state(ComplaintForm.contact)
     await message.answer("📞 Введите ваш контакт (телефон, email или Telegram):")
-    await ComplaintForm.contact.set()
 
-@dp.message_handler(state=ComplaintForm.contact)
-async def complaint_get_contact(message: types.Message, state: FSMContext):
+@dp.message(ComplaintForm.contact)
+async def process_contact(message: types.Message, state: FSMContext):
     await state.update_data(contact=message.text)
+    await state.set_state(ComplaintForm.complaint_text)
     await message.answer("✍️ Опишите вашу жалобу или предложение:")
-    await ComplaintForm.complaint_text.set()
 
-@dp.message_handler(state=ComplaintForm.complaint_text)
-async def complaint_get_text(message: types.Message, state: FSMContext):
+@dp.message(ComplaintForm.complaint_text)
+async def process_complaint_text(message: types.Message, state: FSMContext):
     await state.update_data(complaint_text=message.text)
     data = await state.get_data()
     confirmation_text = (f"🔹 ФИО: {data['full_name']}\n"
                          f"🔹 Контакт: {data['contact']}\n"
                          f"🔹 Текст: {data['complaint_text']}\n\n"
                          "✅ Подтвердите отправку или ❌ отмените.")
-    confirm_kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    confirm_kb.row("✅ Подтвердить", "❌ Отмена")
+    await state.set_state(ComplaintForm.confirm)
     await message.answer(confirmation_text, reply_markup=confirm_kb)
-    await ComplaintForm.confirm.set()
 
-@dp.message_handler(lambda message: message.text in ["✅ Подтвердить", "❌ Отмена"], state=ComplaintForm.confirm)
-async def complaint_confirm(message: types.Message, state: FSMContext):
+@dp.message(ComplaintForm.confirm, F.text.in_(["✅ Подтвердить", "❌ Отмена"]))
+async def process_confirmation(message: types.Message, state: FSMContext):
     if message.text == "✅ Подтвердить":
         data = await state.get_data()
         admin_message = (f"📩 Новая жалоба/предложение\n\n"
@@ -263,54 +345,54 @@ async def complaint_confirm(message: types.Message, state: FSMContext):
         await message.answer("✅ Ваше сообщение успешно отправлено администратору.", reply_markup=menu_kb)
     else:
         await message.answer("❌ Отправка отменена.", reply_markup=menu_kb)
-    await state.finish()
+    await state.clear()
 
 # Википедия
-@dp.message_handler(lambda message: message.text == "🔎 Википедия")
-async def wiki_search_start(message: types.Message, state: FSMContext):
-    await message.answer("🔎 Введите запрос для поиска в Википедии:")
-    await state.set_state("wiki_search")
+@dp.message(F.text == "🔎 Википедия")
+async def process_wiki_start(message: types.Message, state: FSMContext):
+    await state.set_state(WikiSearch.searching)
+    await message.answer("🔎 Введите запрос для поиска в Википедии:", parse_mode="HTML")
 
-@dp.message_handler(state="wiki_search")
-async def wiki_search(message: types.Message, state: FSMContext):
+@dp.message(WikiSearch.searching)
+async def process_wiki_search(message: types.Message, state: FSMContext):
     page = wiki_wiki.page(message.text)
     if page.exists():
-        save_query(message.from_user.id, message.from_user.username, "wiki", message.text)
-        await message.answer(f"📚 {page.summary[:1000]}...")
+        save_query(message.from_user.id, message.from_user.username or str(message.from_user.id), "wiki", message.text)
+        await message.answer(f"📚 {page.summary[:1000]}...", parse_mode="HTML")
     else:
-        await message.answer("❌ Страница не найдена.")
-    await state.finish()
+        await message.answer("❌ Страница не найдена.", parse_mode="HTML")
+    await state.clear()
 
 # Переводчик
-@dp.message_handler(lambda message: message.text == "🈹 Переводчик")
-async def translate_start(message: types.Message, state: FSMContext):
-    await message.answer("🌍 Введите текст для перевода на английский:")
-    await state.set_state("translate_text")
+@dp.message(F.text == "🈹 Переводчик")
+async def process_translate_start(message: types.Message, state: FSMContext):
+    await state.set_state(TranslateText.translating)
+    await message.answer("🌍 Введите текст для перевода на английский:", parse_mode="HTML")
 
-@dp.message_handler(state="translate_text")
-async def translate_text(message: types.Message, state: FSMContext):
+@dp.message(TranslateText.translating)
+async def process_translate(message: types.Message, state: FSMContext):
     text_to_translate = message.text.strip()
     translated = translator.translate(text_to_translate, dest='en')
-    save_query(message.from_user.id, message.from_user.username, "translate", text_to_translate)
-    await message.answer(f"🔠 Перевод: {translated.text}")
-    await state.finish()
+    save_query(message.from_user.id, message.from_user.username or str(message.from_user.id), "translate", text_to_translate)
+    await message.answer(f"🔠 Перевод: {translated.text}", parse_mode="HTML")
+    await state.clear()
 
-# Погода (заглушка)
-@dp.message_handler(lambda message: message.text == "🌤 Погода")
-async def weather_start(message: types.Message, state: FSMContext):
-    await message.answer("🌍 Введите название города:")
-    await state.set_state("weather_city")
+# Погода
+@dp.message(F.text == "🌤 Погода")
+async def process_weather_start(message: types.Message, state: FSMContext):
+    await state.set_state(WeatherCity.waiting_city)
+    await message.answer("🌍 Введите название города:", parse_mode="HTML")
 
-@dp.message_handler(state="weather_city")
-async def get_weather(message: types.Message, state: FSMContext):
+@dp.message(WeatherCity.waiting_city)
+async def process_weather(message: types.Message, state: FSMContext):
     city = message.text
     weather_info = f"Погода в {city}: Ясно, 6°C"
-    await message.answer(weather_info)
-    await state.finish()
+    await message.answer(weather_info, parse_mode="HTML")
+    await state.clear()
 
 # Курс валют
-@dp.message_handler(lambda message: message.text == "💰 Курс валют")
-async def exchange_rate(message: types.Message):
+@dp.message(F.text == "💰 Курс валют")
+async def process_exchange_rate(message: types.Message):
     url = "https://api.exchangerate-api.com/v4/latest/USD"
     response = requests.get(url).json()
     rates = response.get("rates", {})
@@ -329,57 +411,26 @@ async def exchange_rate(message: types.Message):
     else:
         await message.answer("❌ Не удалось загрузить курс валют.")
 
-# Отображение текущей даты и времени
-@dp.message_handler(lambda message: message.text == "📅 Дата и время")
-async def get_datetime(message: types.Message):
+# Дата и время
+@dp.message(F.text == "📅 Дата и время")
+async def process_datetime(message: types.Message):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     await message.answer(f"📅 Текущая дата и время: {now}")
 
-# Генерация случайного числа
-@dp.message_handler(lambda message: message.text == "🎲 Случайное число")
-async def random_number(message: types.Message):
+# Случайное число
+@dp.message(F.text == "🎲 Случайное число")
+async def process_random_number(message: types.Message):
     number = random.randint(1, 100)
     await message.answer(f"🎲 Ваше случайное число: {number}")
 
-# Заглушка для информации о местоположении
-@dp.message_handler(lambda message: message.text == "📍 Местоположение")
-async def location_placeholder(message: types.Message):
+# Местоположение
+@dp.message(F.text == "📍 Местоположение")
+async def process_location(message: types.Message):
     await message.answer("📍 Извините, но определение местоположения недоступно в этом боте.")
 
-# Команда /history - показать историю запросов пользователя
-@dp.message_handler(commands=['history'])
-async def show_history(message: types.Message):
-    history = get_user_history(message.from_user.id)
-    if history:
-        history_text = "📜 Ваша история запросов:\n\n"
-        for query_type, query_text, timestamp in history:
-            history_text += f"🔹 {query_type}: {query_text}\n"
-            history_text += f"⏰ {timestamp}\n\n"
-        await message.answer(history_text)
-    else:
-        await message.answer("📝 У вас пока нет истории запросов.")
-
-# Команда /popular - показать популярные запросы (только для администратора)
-@dp.message_handler(commands=['popular'])
-async def show_popular(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        popular = get_popular_queries()
-        popular_text = "🔥 Популярные запросы:\n\n"
-        for query_text, count in popular:
-            popular_text += f"🔹 {query_text}: {count} раз\n"
-        await message.answer(popular_text)
-    else:
-        await message.answer("⛔️ У вас нет доступа к этой команде.")
-
-# Команда /clear_history - очистить историю запросов
-@dp.message_handler(commands=['clear_history'])
-async def clear_history(message: types.Message):
-    clear_user_history(message.from_user.id)
-    await message.answer("🗑 Ваша история запросов очищена.")
-
-# Команда /stats - показать личную статистику
-@dp.message_handler(commands=['stats'])
-async def show_personal_stats(message: types.Message):
+# Моя статистика
+@dp.message(F.text == "📊 Моя статистика")
+async def process_stats(message: types.Message):
     stats = get_user_stats(message.from_user.id)
     if stats:
         stats_text = (f"📊 Ваша статистика:\n\n"
@@ -387,52 +438,76 @@ async def show_personal_stats(message: types.Message):
                      f"📚 Запросов в Википедии: {stats[3]}\n"
                      f"🔄 Переводов: {stats[4]}\n"
                      f"⏰ Последняя активность: {stats[5]}")
-        await message.answer(stats_text)
+        await message.answer(stats_text, reply_markup=stats_kb)
     else:
-        await message.answer("📝 У вас пока нет статистики.")
+        await message.answer("📝 У вас пока нет статистики.", reply_markup=stats_kb)
 
-# Команда /favorites - показать избранные запросы
-@dp.message_handler(commands=['favorites'])
-async def show_favorites(message: types.Message):
+# История
+@dp.message(F.text == "📜 История")
+async def process_history(message: types.Message):
+    history = get_user_history(message.from_user.id)
+    if history:
+        history_text = "📜 Ваша история запросов:\n\n"
+        for query_type, query_text, timestamp in history:
+            history_text += f"🔹 {query_type}: {query_text}\n"
+            history_text += f"⏰ {timestamp}\n\n"
+        await message.answer(history_text, reply_markup=stats_kb)
+    else:
+        await message.answer("📝 У вас пока нет истории запросов.", reply_markup=stats_kb)
+
+# Избранное
+@dp.message(F.text == "⭐️ Избранное")
+async def process_favorites(message: types.Message):
     favorites = get_favorites(message.from_user.id)
     if favorites:
         favorites_text = "⭐️ Ваши избранные запросы:\n\n"
         for query_type, query_text, timestamp in favorites:
             favorites_text += f"🔹 {query_type}: {query_text}\n"
             favorites_text += f"⏰ {timestamp}\n\n"
-        await message.answer(favorites_text)
+        await message.answer(favorites_text, reply_markup=favorites_kb)
     else:
-        await message.answer("📝 У вас пока нет избранных запросов.")
+        await message.answer("📝 У вас пока нет избранных запросов.", reply_markup=favorites_kb)
 
-# Команда /add_favorite - добавить текущий запрос в избранное
-@dp.message_handler(commands=['add_favorite'])
-async def add_favorite(message: types.Message, state: FSMContext):
-    await message.answer("💾 Введите запрос, который хотите добавить в избранное:")
-    await state.set_state("add_favorite")
+# Очистить историю
+@dp.message(F.text == "🗑 Очистить историю")
+async def process_clear_history(message: types.Message):
+    clear_user_history(message.from_user.id)
+    await message.answer("🗑 Ваша история запросов очищена.", reply_markup=stats_kb)
 
-@dp.message_handler(state="add_favorite")
+# Добавить в избранное
+@dp.message(F.text == "➕ Добавить в избранное")
+async def process_add_favorite_start(message: types.Message, state: FSMContext):
+    await state.set_state(FavoriteManage.adding)
+    await message.answer("💾 Введите запрос, который хотите добавить в избранное:", reply_markup=favorites_kb, parse_mode="HTML")
+
+@dp.message(FavoriteManage.adding)
 async def process_add_favorite(message: types.Message, state: FSMContext):
     query_text = message.text.strip()
     add_to_favorites(message.from_user.id, "general", query_text)
-    await message.answer("✅ Запрос добавлен в избранное!")
-    await state.finish()
+    await message.answer("✅ Запрос добавлен в избранное!", reply_markup=favorites_kb, parse_mode="HTML")
+    await state.clear()
 
-# Команда /remove_favorite - удалить запрос из избранного
-@dp.message_handler(commands=['remove_favorite'])
-async def remove_favorite(message: types.Message, state: FSMContext):
-    await message.answer("🗑 Введите запрос, который хотите удалить из избранного:")
-    await state.set_state("remove_favorite")
+# Удалить из избранного
+@dp.message(F.text == "➖ Удалить из избранного")
+async def process_remove_favorite_start(message: types.Message, state: FSMContext):
+    await state.set_state(FavoriteManage.removing)
+    await message.answer("🗑 Введите запрос, который хотите удалить из избранного:", reply_markup=favorites_kb, parse_mode="HTML")
 
-@dp.message_handler(state="remove_favorite")
+@dp.message(FavoriteManage.removing)
 async def process_remove_favorite(message: types.Message, state: FSMContext):
     query_text = message.text.strip()
     remove_from_favorites(message.from_user.id, query_text)
-    await message.answer("✅ Запрос удален из избранного!")
-    await state.finish()
+    await message.answer("✅ Запрос удален из избранного!", reply_markup=favorites_kb, parse_mode="HTML")
+    await state.clear()
 
-# Команда /admin_stats - показать статистику всех пользователей (только для администратора)
-@dp.message_handler(commands=['admin_stats'])
-async def show_admin_stats(message: types.Message):
+# Назад в главное меню
+@dp.message(F.text == "🔙 Назад в главное меню")
+async def process_back_to_menu(message: types.Message):
+    await message.answer("Главное меню:", reply_markup=menu_kb)
+
+# Команды администратора
+@dp.message(Command("admin_stats"))
+async def cmd_admin_stats(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         conn = sqlite3.connect('bot_database.db')
         c = conn.cursor()
@@ -453,85 +528,36 @@ async def show_admin_stats(message: types.Message):
     else:
         await message.answer("⛔️ У вас нет доступа к этой команде.")
 
-# Обработчик кнопки "📊 Моя статистика"
-@dp.message_handler(lambda message: message.text == "📊 Моя статистика")
-async def show_stats_button(message: types.Message):
-    stats = get_user_stats(message.from_user.id)
-    if stats:
-        stats_text = (f"📊 Ваша статистика:\n\n"
-                     f"👤 Всего запросов: {stats[2]}\n"
-                     f"📚 Запросов в Википедии: {stats[3]}\n"
-                     f"🔄 Переводов: {stats[4]}\n"
-                     f"⏰ Последняя активность: {stats[5]}")
-        await message.answer(stats_text, reply_markup=stats_kb)
+@dp.message(Command("popular"))
+async def cmd_popular(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        popular = get_popular_queries()
+        if popular:
+            popular_text = "🔥 Популярные запросы:\n\n"
+            for query_text, count in popular:
+                popular_text += f"🔹 {query_text}: {count} раз\n"
+            await message.answer(popular_text)
+        else:
+            await message.answer("📝 Пока нет популярных запросов.")
     else:
-        await message.answer("📝 У вас пока нет статистики.", reply_markup=stats_kb)
+        await message.answer("⛔️ У вас нет доступа к этой команде.")
 
-# Обработчик кнопки "📜 История"
-@dp.message_handler(lambda message: message.text == "📜 История")
-async def show_history_button(message: types.Message):
-    history = get_user_history(message.from_user.id)
-    if history:
-        history_text = "📜 Ваша история запросов:\n\n"
-        for query_type, query_text, timestamp in history:
-            history_text += f"🔹 {query_type}: {query_text}\n"
-            history_text += f"⏰ {timestamp}\n\n"
-        await message.answer(history_text, reply_markup=stats_kb)
-    else:
-        await message.answer("📝 У вас пока нет истории запросов.", reply_markup=stats_kb)
+# Обработчик для всех остальных сообщений
+@dp.message()
+async def process_other_messages(message: types.Message):
+    await message.answer("Не понимаю эту команду. Используйте клавиатуру или /help для просмотра доступных команд.")
 
-# Обработчик кнопки "⭐️ Избранное"
-@dp.message_handler(lambda message: message.text == "⭐️ Избранное")
-async def show_favorites_button(message: types.Message):
-    favorites = get_favorites(message.from_user.id)
-    if favorites:
-        favorites_text = "⭐️ Ваши избранные запросы:\n\n"
-        for query_type, query_text, timestamp in favorites:
-            favorites_text += f"🔹 {query_type}: {query_text}\n"
-            favorites_text += f"⏰ {timestamp}\n\n"
-        await message.answer(favorites_text, reply_markup=favorites_kb)
-    else:
-        await message.answer("📝 У вас пока нет избранных запросов.", reply_markup=favorites_kb)
+# Запуск бота
+async def main():
+    # Инициализация базы данных
+    init_db()
+    logger.info("Бот запущен")
+    
+    # Запуск бота
+    await dp.start_polling(bot)
 
-# Обработчик кнопки "🗑 Очистить историю"
-@dp.message_handler(lambda message: message.text == "🗑 Очистить историю")
-async def clear_history_button(message: types.Message):
-    clear_user_history(message.from_user.id)
-    await message.answer("🗑 Ваша история запросов очищена.", reply_markup=stats_kb)
-
-# Обработчик кнопки "➕ Добавить в избранное"
-@dp.message_handler(lambda message: message.text == "➕ Добавить в избранное")
-async def add_favorite_button(message: types.Message, state: FSMContext):
-    await message.answer("💾 Введите запрос, который хотите добавить в избранное:", reply_markup=favorites_kb)
-    await state.set_state("add_favorite")
-
-# Обработчик кнопки "➖ Удалить из избранного"
-@dp.message_handler(lambda message: message.text == "➖ Удалить из избранного")
-async def remove_favorite_button(message: types.Message, state: FSMContext):
-    await message.answer("🗑 Введите запрос, который хотите удалить из избранного:", reply_markup=favorites_kb)
-    await state.set_state("remove_favorite")
-
-# Обработчик кнопки "🔙 Назад в главное меню"
-@dp.message_handler(lambda message: message.text == "🔙 Назад в главное меню")
-async def back_to_main_menu(message: types.Message):
-    await message.answer("Главное меню:", reply_markup=menu_kb)
-
-# Добавим обработчик ошибок
-@dp.errors_handler()
-async def errors_handler(update, exception):
+if __name__ == "__main__":
     try:
-        raise exception
-    except Exception as e:
-        logger.exception(f"Произошла ошибка: {e}")
-        return True
-
-if __name__ == '__main__':
-    try:
-        logger.info("Бот запущен")
-        init_db()  # Инициализируем базу данных при запуске
-        from aiogram import executor
-        executor.start_polling(dp, skip_updates=True)
-    except Exception as e:
-        logger.exception(f"Критическая ошибка: {e}")
-    finally:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен")

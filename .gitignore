@@ -1,20 +1,27 @@
 # Виртуальное окружение
 venv/
 env/
+.env
+
+# База данных
+*.db
+bot_database.db
 
 # Кэш Python
 __pycache__/
 *.py[cod]
-
-# База данных
-*.db
-
-# Переменные окружения
-.env
+*$py.class
 
 # Логи
 *.log
+bot.log
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+
+# Системные файлы
+.DS_Store
+Thumbs.db
